@@ -84,8 +84,7 @@ class S3ObjectTransport
     Aws::Crt::Http::HttpHeader m_contentTypeHeader;
     Aws::Crt::String m_endpoint;
 
-    uint32_t m_upStreamsAvailable;
-    aws_mutex m_upStreamsAvailableMutex;
+    std::atomic<uint32_t> m_upStreamsAvailable;
     aws_mutex m_multipartUploadQueueMutex;
 
     std::queue<std::shared_ptr<MultipartTransferState>> m_multipartUploadQueue;
@@ -110,5 +109,5 @@ class S3ObjectTransport
 
     void PushMultipartUpload(std::shared_ptr<MultipartTransferState> uploadState);
     std::shared_ptr<MultipartTransferState> PeekMultipartUploadQueue();
-    void PopMultipartUploadQueue();
+    void PopMultipartUploadQueue(std::shared_ptr<MultipartTransferState> uploadState);
 };

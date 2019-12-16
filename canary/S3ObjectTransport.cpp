@@ -68,13 +68,11 @@ S3ObjectTransport::S3ObjectTransport(
 
     m_upStreamsAvailable = MaxStreams;
 
-    aws_mutex_init(&m_upStreamsAvailableMutex);
     aws_mutex_init(&m_multipartUploadQueueMutex);
 }
 
 S3ObjectTransport::~S3ObjectTransport()
 {
-    aws_mutex_clean_up(&m_upStreamsAvailableMutex);
     aws_mutex_clean_up(&m_multipartUploadQueueMutex);
 }
 
@@ -632,15 +630,17 @@ bool S3ObjectTransport::UploadNextPartsForNextObject(uint32_t upStreamsReturning
     uint32_t numPartsToUpload = 0;
     std::shared_ptr<MultipartTransferState> uploadState;
 
-    aws_mutex_lock(&m_upStreamsAvailableMutex);
+    uint32_t streamsToProcess = m_upStreamsAvailable.exchange(0);
 
-    m_upStreamsAvailable += upStreamsReturning;
+    // If we're throwing any streams back, don't increment the shared counter with them
+    // just yet.  This way we guarantee we can actually use those streams here if
+    // we can.
+    streamsToProcess += upStreamsReturning;
 
-    if (m_upStreamsAvailable > 0)
+    if (streamsToProcess > 0)
     {
         bool searchingQueue = true;
 
-        // Find the next thing in the queue that needs parts uploaded, cleaning up the queue along the way.
         while (searchingQueue)
         {
             uploadState = PeekMultipartUploadQueue();
@@ -649,19 +649,26 @@ bool S3ObjectTransport::UploadNextPartsForNextObject(uint32_t upStreamsReturning
             {
                 searchingQueue = false;
             }
-            else if (uploadState->GetPartsForUpload(m_upStreamsAvailable, startPartIndex, numPartsToUpload))
+            else if (uploadState->GetPartsForUpload(streamsToProcess, startPartIndex, numPartsToUpload))
             {
-                m_upStreamsAvailable -= numPartsToUpload;
+                streamsToProcess -= numPartsToUpload;
+                AWS_FATAL_ASSERT(streamsToProcess >= 0);
                 searchingQueue = false;
             }
             else
             {
-                PopMultipartUploadQueue();
+                PopMultipartUploadQueue(uploadState);
             }
         }
     }
 
-    aws_mutex_unlock(&m_upStreamsAvailableMutex);
+    m_upStreamsAvailable += streamsToProcess;
+
+    if (uploadState == nullptr)
+    {
+        AWS_FATAL_ASSERT(numPartsToUpload == 0);
+        return false;
+    }
 
     for (uint32_t i = 0; i < numPartsToUpload; ++i)
     {
@@ -737,9 +744,12 @@ std::shared_ptr<MultipartTransferState> S3ObjectTransport::PeekMultipartUploadQu
     return uploadState;
 }
 
-void S3ObjectTransport::PopMultipartUploadQueue()
+void S3ObjectTransport::PopMultipartUploadQueue(std::shared_ptr<MultipartTransferState> uploadState)
 {
     aws_mutex_lock(&m_multipartUploadQueueMutex);
-    m_multipartUploadQueue.pop();
+    if (m_multipartUploadQueue.front() == uploadState)
+    {
+        m_multipartUploadQueue.pop();
+    }
     aws_mutex_unlock(&m_multipartUploadQueueMutex);
 }
